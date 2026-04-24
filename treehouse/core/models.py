@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 
 class AgentStatus(Enum):
+    SPAWNING = "spawning"
     PENDING = "pending"
     RUNNING = "running"
     DONE = "done"

@@ -87,7 +87,10 @@ def spawn(name: str, task: str):
         docker_mgr = DockerManager(compose_out)
         docker_mgr.generate(compose_out, workspace.compose_project, port_mapping)
 
-    docker_mgr.start(compose_out, workspace.compose_project)
+    try:
+        docker_mgr.start(compose_out, workspace.compose_project)
+    except Exception as e:
+        typer.echo(f"Docker containers failed to start (non-fatal): {e}")
 
     source_env = root / config.env_file if (root / config.env_file).exists() else None
     rewrite_env(source_env, wt_path / ".env", port_mapping)

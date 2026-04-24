@@ -34,6 +34,7 @@ class TreehouseApp(App):
     BINDINGS = [
         ("s", "spawn", "Spawn"),
         ("e", "enter_sandbox", "Enter"),
+        ("c", "copy_logs", "Copy"),
         ("m", "merge", "Merge"),
         ("k", "kill", "Kill"),
         ("d", "destroy_agent", "Destroy"),
@@ -81,7 +82,7 @@ class TreehouseApp(App):
         selected = table.selected_agent
         if selected and selected in self.workspaces:
             viewer = self.query_one(LogViewer)
-            viewer.update_logs(self.workspaces[selected].log_buffer)
+            viewer.update_logs(selected, self.workspaces[selected].log_buffer)
 
     def action_spawn(self) -> None:
         from treehouse.tui.dialogs import SpawnDialog
@@ -100,42 +101,56 @@ class TreehouseApp(App):
             config = self._get_config()
             allocator = self._get_allocator()
 
+            # Create workspace immediately with SPAWNING status
+            port_base = allocator.allocate()
+            ws = AgentWorkspace(
+                name=name, task_prompt=task,
+                worktree_path=Path("."),  # placeholder until worktree created
+                port_base=port_base,
+                status=AgentStatus.SPAWNING,
+            )
+            self.workspaces[name] = ws
+            self._save()
+
+            # Create worktree
+            ws.log_buffer.append("Creating git worktree...")
             wt_mgr = WorktreeManager(config.root)
             wt_path = wt_mgr.create(name)
-            port_base = allocator.allocate()
+            ws.worktree_path = wt_path
 
             # Auto-generate or use existing compose
+            ws.log_buffer.append("Generating Docker Compose...")
             compose_out = wt_path / "docker-compose.treehouse.yml"
             ws_project = f"treehouse_{name.replace('-', '_')}"
 
             if config.compose_file and (config.root / config.compose_file).exists():
-                # Use existing compose file as base
                 generator = ComposeGenerator()
                 _, port_defaults = generator.detect(config.root)
                 port_mapping = allocator.get_port_mapping(port_base, port_defaults or {"app": 3000})
                 docker_mgr = DockerManager(config.root / config.compose_file)
                 docker_mgr.generate(compose_out, ws_project, port_mapping)
             else:
-                # Auto-generate from project detection
                 generator = ComposeGenerator()
                 port_defaults = generator.generate(config.root, compose_out)
                 port_mapping = allocator.get_port_mapping(port_base, port_defaults or {"app": 3000})
-                # Rewrite ports in the generated file
                 docker_mgr = DockerManager(compose_out)
                 docker_mgr.generate(compose_out, ws_project, port_mapping)
 
-            # Start containers
-            docker_mgr.start(compose_out, ws_project)
+            # Start containers (non-fatal)
+            ws.log_buffer.append("Starting Docker containers...")
+            try:
+                docker_mgr.start(compose_out, ws_project)
+                ws.log_buffer.append("Docker containers started.")
+            except Exception as e:
+                ws.log_buffer.append(f"Docker failed (non-fatal): {e}")
+                self.notify("Docker containers failed to start", severity="warning")
 
             # Env rewriting
+            ws.log_buffer.append("Rewriting .env with isolated ports...")
             source_env = config.root / config.env_file if (config.root / config.env_file).exists() else None
             rewrite_env(source_env, wt_path / ".env", port_mapping)
 
-            ws = AgentWorkspace(
-                name=name, task_prompt=task,
-                worktree_path=wt_path, port_base=port_base,
-            )
-            self.workspaces[name] = ws
+            ws.status = AgentStatus.PENDING
             self._save()
 
             self.notify(f"Spawned '{name}' on port {port_base}")
@@ -156,8 +171,25 @@ class TreehouseApp(App):
         except Exception as e:
             workspace.status = AgentStatus.FAILED
             workspace.log_buffer.append(f"ERROR: {e}")
-            self.call_from_thread(self.notify, f"Agent failed: {e}", severity="error")
+            self.notify(f"Agent failed: {e}", severity="error")
         self._save()
+
+    def action_copy_logs(self) -> None:
+        table = self.query_one(AgentTable)
+        name = table.selected_agent
+        if not name or name not in self.workspaces:
+            self.notify("No agent selected", severity="warning")
+            return
+        ws = self.workspaces[name]
+        if not ws.log_buffer:
+            self.notify("No logs to copy", severity="warning")
+            return
+        text = "\n".join(ws.log_buffer)
+        try:
+            subprocess.run(["pbcopy"], input=text.encode(), check=True)
+        except Exception:
+            self.copy_to_clipboard(text)
+        self.notify(f"Copied {len(ws.log_buffer)} log lines")
 
     def action_enter_sandbox(self) -> None:
         table = self.query_one(AgentTable)

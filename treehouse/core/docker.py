@@ -9,6 +9,22 @@ import yaml
 class ComposeGenerator:
     """Auto-detect project stack and generate a docker-compose.yml."""
 
+    def _app_service(self, project_root: Path, image: str, port: int, cmd: str, extra_volumes: list[str] | None = None) -> dict:
+        """Build an app service dict, using build if Dockerfile exists, else image."""
+        svc = {}
+        if (project_root / "Dockerfile").exists():
+            svc["build"] = "."
+        else:
+            svc["image"] = image
+        svc["ports"] = [f"{port}:{port}"]
+        vols = [".:/app"]
+        if extra_volumes:
+            vols.extend(extra_volumes)
+        svc["volumes"] = vols
+        svc["working_dir"] = "/app"
+        svc["command"] = cmd
+        return svc
+
     def detect(self, project_root: Path) -> dict:
         services = {}
         port_defaults = {}
@@ -20,77 +36,35 @@ class ComposeGenerator:
             pkg = json.loads(pkg_json.read_text())
             deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
 
-            if "next" in deps:
-                services["app"] = {
-                    "build": ".",
-                    "ports": ["3000:3000"],
-                    "volumes": [".:/app", "/app/node_modules"],
-                    "working_dir": "/app",
-                    "command": "npm run dev",
-                }
-                port_defaults["app"] = 3000
-            elif any(k in deps for k in ("react-scripts", "vite", "vue")):
-                services["app"] = {
-                    "build": ".",
-                    "ports": ["3000:3000"],
-                    "volumes": [".:/app", "/app/node_modules"],
-                    "working_dir": "/app",
-                    "command": "npm run dev",
-                }
-                port_defaults["app"] = 3000
+            if "next" in deps or any(k in deps for k in ("react-scripts", "vite", "vue")):
+                services["app"] = self._app_service(project_root, "node:20-alpine", 3000, "npm run dev", ["/app/node_modules"])
             elif any(k in deps for k in ("express", "fastify", "koa", "hono")):
-                services["app"] = {
-                    "build": ".",
-                    "ports": ["3000:3000"],
-                    "volumes": [".:/app", "/app/node_modules"],
-                    "working_dir": "/app",
-                    "command": "npm start",
-                }
-                port_defaults["app"] = 3000
+                services["app"] = self._app_service(project_root, "node:20-alpine", 3000, "npm start", ["/app/node_modules"])
             else:
-                services["app"] = {
-                    "image": "node:20-alpine",
-                    "ports": ["3000:3000"],
-                    "volumes": [".:/app", "/app/node_modules"],
-                    "working_dir": "/app",
-                    "command": "npm start",
-                }
-                port_defaults["app"] = 3000
+                services["app"] = self._app_service(project_root, "node:20-alpine", 3000, "npm start", ["/app/node_modules"])
+            port_defaults["app"] = 3000
 
-            # Detect database needs from deps
             if any(k in deps for k in ("pg", "postgres", "prisma", "@prisma/client", "typeorm", "knex", "sequelize", "drizzle-orm")):
                 services["db"] = {
                     "image": "postgres:16-alpine",
                     "ports": ["5432:5432"],
-                    "environment": {
-                        "POSTGRES_USER": "treehouse",
-                        "POSTGRES_PASSWORD": "treehouse",
-                        "POSTGRES_DB": "app",
-                    },
+                    "environment": {"POSTGRES_USER": "treehouse", "POSTGRES_PASSWORD": "treehouse", "POSTGRES_DB": "app"},
                     "volumes": ["pgdata:/var/lib/postgresql/data"],
                 }
                 port_defaults["db"] = 5432
 
             if any(k in deps for k in ("redis", "ioredis", "bullmq", "@bull-board/api")):
-                services["redis"] = {
-                    "image": "redis:7-alpine",
-                    "ports": ["6379:6379"],
-                }
+                services["redis"] = {"image": "redis:7-alpine", "ports": ["6379:6379"]}
                 port_defaults["redis"] = 6379
 
             if any(k in deps for k in ("mongodb", "mongoose", "mongosh")):
-                services["mongo"] = {
-                    "image": "mongo:7",
-                    "ports": ["27017:27017"],
-                    "volumes": ["mongodata:/data/db"],
-                }
+                services["mongo"] = {"image": "mongo:7", "ports": ["27017:27017"], "volumes": ["mongodata:/data/db"]}
                 port_defaults["mongo"] = 27017
 
         # Python projects
         has_requirements = (project_root / "requirements.txt").exists()
         has_pyproject = (project_root / "pyproject.toml").exists()
         if (has_requirements or has_pyproject) and "app" not in services:
-            # Read deps to detect framework
             deps_text = ""
             if has_requirements:
                 deps_text = (project_root / "requirements.txt").read_text().lower()
@@ -100,61 +74,35 @@ class ComposeGenerator:
             port = 8000
             cmd = "python -m uvicorn main:app --host 0.0.0.0 --reload"
             if "django" in deps_text:
-                port = 8000
                 cmd = "python manage.py runserver 0.0.0.0:8000"
             elif "flask" in deps_text:
                 port = 5000
                 cmd = "flask run --host=0.0.0.0"
-            elif "fastapi" in deps_text or "uvicorn" in deps_text:
-                port = 8000
 
-            services["app"] = {
-                "build": ".",
-                "ports": [f"{port}:{port}"],
-                "volumes": [".:/app"],
-                "working_dir": "/app",
-                "command": cmd,
-            }
+            services["app"] = self._app_service(project_root, "python:3.12-slim", port, cmd)
             port_defaults["app"] = port
 
             if "psycopg" in deps_text or "sqlalchemy" in deps_text or "django" in deps_text:
                 services["db"] = {
                     "image": "postgres:16-alpine",
                     "ports": ["5432:5432"],
-                    "environment": {
-                        "POSTGRES_USER": "treehouse",
-                        "POSTGRES_PASSWORD": "treehouse",
-                        "POSTGRES_DB": "app",
-                    },
+                    "environment": {"POSTGRES_USER": "treehouse", "POSTGRES_PASSWORD": "treehouse", "POSTGRES_DB": "app"},
                     "volumes": ["pgdata:/var/lib/postgresql/data"],
                 }
                 port_defaults["db"] = 5432
 
             if "redis" in deps_text or "celery" in deps_text:
-                services["redis"] = {
-                    "image": "redis:7-alpine",
-                    "ports": ["6379:6379"],
-                }
+                services["redis"] = {"image": "redis:7-alpine", "ports": ["6379:6379"]}
                 port_defaults["redis"] = 6379
 
         # Go projects
         if (project_root / "go.mod").exists() and "app" not in services:
-            services["app"] = {
-                "build": ".",
-                "ports": ["8080:8080"],
-                "volumes": [".:/app"],
-                "working_dir": "/app",
-            }
+            services["app"] = self._app_service(project_root, "golang:1.22-alpine", 8080, "go run .")
             port_defaults["app"] = 8080
 
         # Rust projects
         if (project_root / "Cargo.toml").exists() and "app" not in services:
-            services["app"] = {
-                "build": ".",
-                "ports": ["8080:8080"],
-                "volumes": [".:/app"],
-                "working_dir": "/app",
-            }
+            services["app"] = self._app_service(project_root, "rust:1.77-slim", 8080, "cargo run")
             port_defaults["app"] = 8080
 
         # Fallback: generic dev container
@@ -168,13 +116,11 @@ class ComposeGenerator:
             }
 
         compose = {"services": services}
-        # Add named volumes
         volumes = {}
         for svc in services.values():
             for v in svc.get("volumes", []):
                 if ":" in v and not v.startswith(".") and not v.startswith("/"):
-                    vol_name = v.split(":")[0]
-                    volumes[vol_name] = None
+                    volumes[v.split(":")[0]] = None
         if volumes:
             compose["volumes"] = volumes
 

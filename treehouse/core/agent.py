@@ -46,6 +46,7 @@ class AgentRunner:
             stderr=asyncio.subprocess.PIPE,
             cwd=str(workspace.worktree_path),
             env=env,
+            limit=1024 * 1024,  # 1MB line buffer for large stream-json output
         )
         workspace.process = process
         workspace.status = AgentStatus.RUNNING
