@@ -10,7 +10,7 @@ from treehouse.core.agent import AgentRunner
 from treehouse.core.docker import ComposeGenerator, DockerManager
 from treehouse.core.env import rewrite_env
 from treehouse.core.merger import MergeManager, MergeResult
-from treehouse.core.models import AgentWorkspace
+from treehouse.core.models import AgentStatus, AgentWorkspace
 from treehouse.core.ports import PortAllocator
 from treehouse.core.worktree import WorktreeManager
 
@@ -101,6 +101,26 @@ def spawn(name: str, task: str):
     typer.echo(f"Spawned agent '{name}' on branch treehouse/{name}")
     typer.echo(f"  Worktree: {wt_path}")
     typer.echo(f"  Port base: {port_base}")
+
+    # Launch Claude agent
+    typer.echo(f"  Launching Claude agent...")
+    runner = AgentRunner()
+    asyncio.run(_run_cli_agent(runner, workspace, config, workspaces))
+
+
+async def _run_cli_agent(runner: AgentRunner, workspace: AgentWorkspace, config: TreehouseConfig, workspaces: dict) -> None:
+    try:
+        await runner.start(workspace)
+        _save_workspaces(config, workspaces)
+        await asyncio.gather(
+            runner.stream_output(workspace),
+            runner.wait(workspace),
+        )
+    except Exception as e:
+        workspace.status = AgentStatus.FAILED
+        typer.echo(f"  Agent failed: {e}")
+    _save_workspaces(config, workspaces)
+    typer.echo(f"  Agent '{workspace.name}' finished with status: {workspace.status.value}")
 
 
 @app.command(name="list")

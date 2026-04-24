@@ -3,6 +3,7 @@ from pathlib import Path
 
 
 def test_agent_status_values():
+    assert AgentStatus.SPAWNING.value == "spawning"
     assert AgentStatus.PENDING.value == "pending"
     assert AgentStatus.RUNNING.value == "running"
     assert AgentStatus.DONE.value == "done"

@@ -14,6 +14,7 @@ class AgentRunner:
             "-p",
             "--output-format", "stream-json",
             "--verbose",
+            "--permission-mode", "bypassPermissions",
             workspace.task_prompt,
         ]
 

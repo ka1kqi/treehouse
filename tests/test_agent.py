@@ -12,9 +12,12 @@ def test_build_command():
     runner = AgentRunner()
     cmd = runner.build_command(ws)
     assert "claude" in cmd[0]
-    assert "--print" in cmd
+    assert "-p" in cmd
     assert "--output-format" in cmd
     assert "stream-json" in cmd
+    assert "--verbose" in cmd
+    assert "--permission-mode" in cmd
+    assert "bypassPermissions" in cmd
     assert "fix the bug" in cmd
 
 
