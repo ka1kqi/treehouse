@@ -2,11 +2,11 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Build a CLI + TUI tool that spawns isolated worktree+Docker environments per AI agent, monitors Claude Code sessions in a live dashboard, and merges results with AI-assisted conflict resolution.
+**Goal:** Build a CLI + TUI + web dashboard tool that spawns isolated worktree+Docker environments per AI agent, monitors Claude Code sessions in real-time, and merges results with AI-assisted conflict resolution.
 
-**Architecture:** Monolith Python package. Single Textual TUI process manages agent subprocesses. Each agent gets a git worktree, Docker Compose project, and rewritten .env. Claude Code runs in `--print --output-format stream-json` mode for parseable output streaming.
+**Architecture:** Layered Python package. Core handles git/docker/agent management. FastAPI WebSocket server exposes state to external clients. Textual TUI reads state directly (in-process). Next.js web dashboard (built with v0) connects via WebSocket for a polished browser UI.
 
-**Tech Stack:** Python 3.12+, Typer (CLI), Textual (TUI), PyYAML (config), asyncio (subprocess management)
+**Tech Stack:** Python 3.12+, Typer (CLI), Textual (TUI), FastAPI + uvicorn (WebSocket API), PyYAML (config), asyncio (subprocess management), Next.js + React (web dashboard via v0)
 
 ---
 
@@ -34,6 +34,9 @@ dependencies = [
     "typer>=0.9",
     "textual>=0.50",
     "pyyaml>=6.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "websockets>=12.0",
 ]
 
 [project.scripts]
@@ -1624,4 +1627,579 @@ treehouse dashboard
 ```bash
 git add README.md .gitignore
 git commit -m "docs: add README and gitignore"
+```
+
+---
+
+### Task 15: Shared State Manager
+
+**Files:**
+- Create: `treehouse/server/__init__.py`
+- Create: `treehouse/server/state.py`
+- Create: `tests/test_state.py`
+
+The state manager is the bridge between core and both dashboards. It holds all workspaces and provides serialization + event callbacks for WebSocket broadcasting.
+
+**Step 1: Write the failing test**
+
+```python
+# tests/test_state.py
+import json
+from pathlib import Path
+from treehouse.server.state import StateManager
+from treehouse.core.models import AgentWorkspace, AgentStatus
+
+
+def test_add_workspace():
+    state = StateManager()
+    ws = AgentWorkspace(
+        name="auth-fix", task_prompt="fix login",
+        worktree_path=Path("/tmp/ws"), port_base=3101,
+    )
+    state.add(ws)
+    assert "auth-fix" in state.workspaces
+    assert state.get("auth-fix") is ws
+
+
+def test_snapshot_json():
+    state = StateManager()
+    ws = AgentWorkspace(
+        name="auth-fix", task_prompt="fix login",
+        worktree_path=Path("/tmp/ws"), port_base=3101,
+    )
+    state.add(ws)
+    snapshot = state.snapshot()
+    data = json.loads(snapshot)
+    assert data["type"] == "state"
+    assert len(data["agents"]) == 1
+    assert data["agents"][0]["name"] == "auth-fix"
+    assert data["agents"][0]["status"] == "pending"
+
+
+def test_on_log_callback():
+    state = StateManager()
+    ws = AgentWorkspace(
+        name="test", task_prompt="task",
+        worktree_path=Path("/tmp/ws"), port_base=3101,
+    )
+    state.add(ws)
+    received = []
+    state.on_log = lambda msg: received.append(msg)
+    state.push_log("test", "hello world")
+    assert len(received) == 1
+    assert "hello world" in received[0]
+    assert ws.log_buffer[-1] == "hello world"
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `pytest tests/test_state.py -v`
+Expected: FAIL
+
+**Step 3: Write the implementation**
+
+```python
+# treehouse/server/__init__.py
+```
+
+```python
+# treehouse/server/state.py
+from __future__ import annotations
+
+import json
+from typing import Callable
+
+from treehouse.core.models import AgentWorkspace
+
+
+class StateManager:
+    def __init__(self):
+        self.workspaces: dict[str, AgentWorkspace] = {}
+        self.on_log: Callable[[str], None] | None = None
+        self.on_status_change: Callable[[str], None] | None = None
+
+    def add(self, workspace: AgentWorkspace) -> None:
+        self.workspaces[workspace.name] = workspace
+
+    def get(self, name: str) -> AgentWorkspace | None:
+        return self.workspaces.get(name)
+
+    def remove(self, name: str) -> AgentWorkspace | None:
+        return self.workspaces.pop(name, None)
+
+    def push_log(self, agent_name: str, line: str) -> None:
+        ws = self.workspaces.get(agent_name)
+        if ws:
+            ws.log_buffer.append(line)
+        msg = json.dumps({"type": "log", "agent": agent_name, "line": line})
+        if self.on_log:
+            self.on_log(msg)
+
+    def set_status(self, agent_name: str, status) -> None:
+        ws = self.workspaces.get(agent_name)
+        if ws:
+            ws.status = status
+        msg = json.dumps({"type": "status_change", "agent": agent_name, "status": status.value})
+        if self.on_status_change:
+            self.on_status_change(msg)
+
+    def snapshot(self) -> str:
+        agents = []
+        for ws in self.workspaces.values():
+            agents.append({
+                "name": ws.name,
+                "branch": ws.branch,
+                "port_base": ws.port_base,
+                "status": ws.status.value,
+                "task_prompt": ws.task_prompt,
+                "compose_project": ws.compose_project,
+                "last_log": ws.log_buffer[-1] if ws.log_buffer else "",
+            })
+        return json.dumps({"type": "state", "agents": agents})
+```
+
+**Step 4: Run test to verify it passes**
+
+Run: `pytest tests/test_state.py -v`
+Expected: 3 passed
+
+**Step 5: Commit**
+
+```bash
+git add treehouse/server/__init__.py treehouse/server/state.py tests/test_state.py
+git commit -m "feat: add shared state manager"
+```
+
+---
+
+### Task 16: FastAPI WebSocket Server
+
+**Files:**
+- Create: `treehouse/server/api.py`
+- Create: `tests/test_api.py`
+
+**Step 1: Write the failing test**
+
+```python
+# tests/test_api.py
+import json
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from treehouse.server.api import create_app
+from treehouse.server.state import StateManager
+from treehouse.core.models import AgentWorkspace
+
+
+@pytest.fixture
+def state():
+    s = StateManager()
+    ws = AgentWorkspace(
+        name="auth-fix", task_prompt="fix login",
+        worktree_path=Path("/tmp/ws"), port_base=3101,
+    )
+    s.add(ws)
+    return s
+
+
+@pytest.fixture
+def client(state):
+    app = create_app(state)
+    return TestClient(app)
+
+
+def test_health(client):
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+
+
+def test_get_agents(client):
+    resp = client.get("/agents")
+    assert resp.status_code == 200
+    agents = resp.json()["agents"]
+    assert len(agents) == 1
+    assert agents[0]["name"] == "auth-fix"
+
+
+def test_websocket_receives_state(client):
+    with client.websocket_connect("/ws") as ws:
+        data = ws.receive_json()
+        assert data["type"] == "state"
+        assert len(data["agents"]) == 1
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `pytest tests/test_api.py -v`
+Expected: FAIL
+
+**Step 3: Write the implementation**
+
+```python
+# treehouse/server/api.py
+from __future__ import annotations
+
+import asyncio
+import json
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+
+from treehouse.server.state import StateManager
+
+
+def create_app(state: StateManager) -> FastAPI:
+    app = FastAPI(title="Treehouse API")
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    connected: list[WebSocket] = []
+
+    async def broadcast(message: str):
+        for ws in connected[:]:
+            try:
+                await ws.send_text(message)
+            except Exception:
+                connected.remove(ws)
+
+    # Wire state callbacks to broadcast
+    def on_log(msg: str):
+        asyncio.create_task(broadcast(msg))
+
+    def on_status(msg: str):
+        asyncio.create_task(broadcast(msg))
+
+    state.on_log = on_log
+    state.on_status_change = on_status
+
+    @app.get("/health")
+    async def health():
+        return {"status": "ok"}
+
+    @app.get("/agents")
+    async def get_agents():
+        return json.loads(state.snapshot())
+
+    @app.websocket("/ws")
+    async def websocket_endpoint(websocket: WebSocket):
+        await websocket.accept()
+        connected.append(websocket)
+
+        # Send initial state
+        await websocket.send_text(state.snapshot())
+
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+
+                msg_type = msg.get("type")
+                if msg_type == "spawn":
+                    # Handled by CLI/TUI — web dashboard sends command,
+                    # server acknowledges. Full spawn logic stays in core.
+                    await websocket.send_text(
+                        json.dumps({"type": "ack", "action": "spawn", "name": msg.get("name")})
+                    )
+                elif msg_type == "stop":
+                    await websocket.send_text(
+                        json.dumps({"type": "ack", "action": "stop", "name": msg.get("name")})
+                    )
+                elif msg_type == "merge":
+                    await websocket.send_text(
+                        json.dumps({"type": "ack", "action": "merge", "name": msg.get("name")})
+                    )
+        except WebSocketDisconnect:
+            connected.remove(websocket)
+
+    # Background task to broadcast state every second
+    @app.on_event("startup")
+    async def start_broadcaster():
+        async def tick():
+            while True:
+                await asyncio.sleep(1.0)
+                if connected:
+                    await broadcast(state.snapshot())
+        asyncio.create_task(tick())
+
+    return app
+```
+
+**Step 4: Run test to verify it passes**
+
+Run: `pytest tests/test_api.py -v`
+Expected: 3 passed
+
+**Step 5: Add `server` command to CLI**
+
+In `treehouse/cli.py`, add:
+
+```python
+@app.command()
+def server(port: int = 8080):
+    """Start the WebSocket API server."""
+    import uvicorn
+    from treehouse.server.api import create_app
+    from treehouse.server.state import StateManager
+
+    state = StateManager()
+    state.workspaces = _workspaces
+    api = create_app(state)
+    typer.echo(f"Treehouse API server on http://localhost:{port}")
+    uvicorn.run(api, host="0.0.0.0", port=port)
+```
+
+**Step 6: Commit**
+
+```bash
+git add treehouse/server/api.py tests/test_api.py treehouse/cli.py
+git commit -m "feat: add FastAPI WebSocket server"
+```
+
+---
+
+### Task 17: Next.js Web Dashboard (v0)
+
+**Files:**
+- Create: `web/package.json`
+- Create: `web/app/page.tsx`
+- Create: `web/app/layout.tsx`
+- Create: `web/app/components/agent-table.tsx`
+- Create: `web/app/components/log-viewer.tsx`
+- Create: `web/app/components/spawn-dialog.tsx`
+- Create: `web/app/hooks/use-treehouse.ts`
+
+This task is built with v0. The components should be generated using v0 prompts. Below is the structure and WebSocket hook that connects to the FastAPI server.
+
+**Step 1: Initialize Next.js project**
+
+Run: `cd web && npx create-next-app@latest . --typescript --tailwind --app --eslint --no-src-dir`
+
+**Step 2: Create the WebSocket hook**
+
+```typescript
+// web/app/hooks/use-treehouse.ts
+"use client";
+
+import { useEffect, useRef, useState, useCallback } from "react";
+
+export interface Agent {
+  name: string;
+  branch: string;
+  port_base: number;
+  status: string;
+  task_prompt: string;
+  compose_project: string;
+  last_log: string;
+}
+
+interface TreehouseState {
+  agents: Agent[];
+  logs: Record<string, string[]>;
+  connected: boolean;
+}
+
+export function useTreehouse(url = "ws://localhost:8080/ws") {
+  const ws = useRef<WebSocket | null>(null);
+  const [state, setState] = useState<TreehouseState>({
+    agents: [],
+    logs: {},
+    connected: false,
+  });
+
+  useEffect(() => {
+    const socket = new WebSocket(url);
+    ws.current = socket;
+
+    socket.onopen = () => {
+      setState((s) => ({ ...s, connected: true }));
+    };
+
+    socket.onclose = () => {
+      setState((s) => ({ ...s, connected: false }));
+    };
+
+    socket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+
+      if (data.type === "state") {
+        setState((s) => ({ ...s, agents: data.agents }));
+      } else if (data.type === "log") {
+        setState((s) => ({
+          ...s,
+          logs: {
+            ...s.logs,
+            [data.agent]: [...(s.logs[data.agent] || []), data.line],
+          },
+        }));
+      } else if (data.type === "status_change") {
+        setState((s) => ({
+          ...s,
+          agents: s.agents.map((a) =>
+            a.name === data.agent ? { ...a, status: data.status } : a
+          ),
+        }));
+      }
+    };
+
+    return () => socket.close();
+  }, [url]);
+
+  const send = useCallback(
+    (msg: object) => {
+      if (ws.current?.readyState === WebSocket.OPEN) {
+        ws.current.send(JSON.stringify(msg));
+      }
+    },
+    []
+  );
+
+  const spawn = useCallback(
+    (name: string, task: string) => send({ type: "spawn", name, task }),
+    [send]
+  );
+
+  const stop = useCallback(
+    (name: string) => send({ type: "stop", name }),
+    [send]
+  );
+
+  const merge = useCallback(
+    (name: string) => send({ type: "merge", name }),
+    [send]
+  );
+
+  return { ...state, spawn, stop, merge };
+}
+```
+
+**Step 3: Build dashboard components with v0**
+
+Use these v0 prompts to generate the components:
+
+**Agent Table prompt for v0:**
+> "Build a React table component that displays AI coding agents. Columns: Agent (name), Branch, Port, Status (with colored badges: green=running, yellow=pending, red=failed, blue=done, purple=merging), Last Activity. The table should highlight the selected row. Props: agents array, selectedAgent string, onSelectAgent callback. Use Tailwind CSS with a dark theme."
+
+**Log Viewer prompt for v0:**
+> "Build a React log viewer component that displays streaming terminal output. It should auto-scroll to the bottom as new lines appear, with a monospace font, dark background, and green text like a terminal. Props: logs string array. Use Tailwind CSS."
+
+**Spawn Dialog prompt for v0:**
+> "Build a React modal dialog for spawning a new AI agent. Two input fields: Agent Name (text) and Task (textarea). A Spawn button (green) and Cancel button. Props: isOpen boolean, onSpawn(name, task) callback, onClose callback. Use Tailwind CSS with a dark theme and backdrop blur."
+
+**Step 4: Create the main page**
+
+```typescript
+// web/app/page.tsx
+"use client";
+
+import { useState } from "react";
+import { useTreehouse } from "./hooks/use-treehouse";
+import { AgentTable } from "./components/agent-table";
+import { LogViewer } from "./components/log-viewer";
+import { SpawnDialog } from "./components/spawn-dialog";
+
+export default function Dashboard() {
+  const { agents, logs, connected, spawn, stop, merge } = useTreehouse();
+  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const [showSpawn, setShowSpawn] = useState(false);
+
+  const selectedLogs = selectedAgent ? logs[selectedAgent] || [] : [];
+
+  return (
+    <div className="min-h-screen bg-gray-950 text-white p-6">
+      <header className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-bold">Treehouse</h1>
+        <div className="flex items-center gap-4">
+          <span className={`text-sm ${connected ? "text-green-400" : "text-red-400"}`}>
+            {connected ? "Connected" : "Disconnected"}
+          </span>
+          <span className="text-sm text-gray-400">{agents.length} agents</span>
+          <button
+            onClick={() => setShowSpawn(true)}
+            className="px-4 py-2 bg-green-600 rounded hover:bg-green-500"
+          >
+            Spawn Agent
+          </button>
+        </div>
+      </header>
+
+      <AgentTable
+        agents={agents}
+        selectedAgent={selectedAgent}
+        onSelectAgent={setSelectedAgent}
+      />
+
+      {selectedAgent && (
+        <div className="mt-4 flex gap-2">
+          <button
+            onClick={() => merge(selectedAgent)}
+            className="px-3 py-1 bg-blue-600 rounded text-sm hover:bg-blue-500"
+          >
+            Merge
+          </button>
+          <button
+            onClick={() => stop(selectedAgent)}
+            className="px-3 py-1 bg-red-600 rounded text-sm hover:bg-red-500"
+          >
+            Stop
+          </button>
+        </div>
+      )}
+
+      <div className="mt-6">
+        <LogViewer logs={selectedLogs} />
+      </div>
+
+      <SpawnDialog
+        isOpen={showSpawn}
+        onSpawn={(name, task) => {
+          spawn(name, task);
+          setShowSpawn(false);
+        }}
+        onClose={() => setShowSpawn(false)}
+      />
+    </div>
+  );
+}
+```
+
+**Step 5: Add `web` command to CLI**
+
+In `treehouse/cli.py`, add:
+
+```python
+@app.command()
+def web():
+    """Start the Next.js web dashboard."""
+    import subprocess
+    web_dir = Path(__file__).parent.parent / "web"
+    if not (web_dir / "node_modules").exists():
+        typer.echo("Installing web dependencies...")
+        subprocess.run(["npm", "install"], cwd=str(web_dir), check=True)
+    typer.echo("Starting web dashboard on http://localhost:3000")
+    subprocess.run(["npm", "run", "dev"], cwd=str(web_dir))
+```
+
+**Step 6: Verify end-to-end**
+
+Run in separate terminals:
+1. `treehouse server` — starts WebSocket API on :8080
+2. `cd web && npm run dev` — starts Next.js on :3000
+3. Open http://localhost:3000 — should show dashboard connected to API
+
+**Step 7: Commit**
+
+```bash
+git add web/ treehouse/cli.py
+git commit -m "feat: add Next.js web dashboard"
 ```

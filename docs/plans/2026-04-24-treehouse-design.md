@@ -8,11 +8,23 @@ Multiple AI agents working on the same repo collide on ports, databases, env fil
 
 ## Solution
 
-A Python CLI + TUI dashboard that spawns fully isolated workspaces per agent: git worktree + Docker Compose project + rewritten `.env`. Launches Claude Code sessions, monitors progress in a live dashboard, and merges results back with AI-assisted conflict resolution.
+A Python CLI with both a TUI dashboard (Textual) and a web dashboard (Next.js via v0). Spawns fully isolated workspaces per agent: git worktree + Docker Compose project + rewritten `.env`. Launches Claude Code sessions, monitors progress in real-time, and merges results back with AI-assisted conflict resolution.
 
 ## Architecture
 
-Monolith Python package. Single process runs the TUI and manages agents as subprocesses.
+Layered architecture. Python core handles all system operations. A FastAPI WebSocket server exposes state to external clients. Two dashboard frontends sit on top: Textual TUI (in-process) and Next.js web dashboard (separate process, built with v0).
+
+```
+┌─────────────────────────────────┐
+│  Next.js Dashboard (v0)         │  ← Web UI on :3000, connects via WebSocket
+├─────────────────────────────────┤
+│  Textual TUI                    │  ← Terminal UI, reads state directly
+├─────────────────────────────────┤
+│  FastAPI WebSocket Server       │  ← API on :8080, broadcasts state changes
+├─────────────────────────────────┤
+│  Python Core                    │  ← git, docker, agent management
+└─────────────────────────────────┘
+```
 
 ```
 treehouse/
@@ -30,15 +42,27 @@ treehouse/
       agent.py          # Claude Code subprocess management
       merger.py         # Sequential merge + AI conflict resolution
       ports.py          # Port allocation tracker
+    server/
+      __init__.py
+      api.py            # FastAPI app with WebSocket endpoint
+      state.py          # Shared state manager (bridge between core and clients)
     tui/
       __init__.py
       app.py            # Textual app main
       agent_table.py    # Top panel widget
       log_viewer.py     # Middle panel widget
       dialogs.py        # Spawn dialog, merge confirmation
+  web/                  # Next.js dashboard (built with v0)
+    package.json
+    app/
+      page.tsx          # Main dashboard page
+      components/
+        agent-table.tsx
+        log-viewer.tsx
+        spawn-dialog.tsx
 ```
 
-Dependencies: `typer`, `textual`, `pyyaml`.
+Dependencies: `typer`, `textual`, `pyyaml`, `fastapi`, `uvicorn`, `websockets`.
 
 ## Data Model
 
@@ -107,6 +131,8 @@ treehouse stop <name>                       # Stop an agent
 treehouse merge <name>                      # Merge agent's branch back
 treehouse destroy <name>                    # Tear down workspace + containers
 treehouse dashboard                         # Launch the TUI
+treehouse server                            # Start the WebSocket API on :8080
+treehouse web                               # Start Next.js dashboard on :3000
 ```
 
 `treehouse init` detects the project's `docker-compose.yml` and stores config in `.treehouse/config.yml`:
@@ -117,6 +143,29 @@ compose_file: docker-compose.yml
 env_file: .env
 ```
 
+## WebSocket API
+
+FastAPI server on port 8080. Bridges the Python core to external clients (the Next.js dashboard).
+
+**WebSocket endpoint:** `ws://localhost:8080/ws`
+
+**Server → Client messages:**
+```json
+{"type": "state", "agents": [{"name": "auth-fix", "branch": "treehouse/auth-fix", "port_base": 3101, "status": "running", "last_log": "editing src/auth.py"}]}
+{"type": "log", "agent": "auth-fix", "line": "[Edit] src/auth.py:42"}
+{"type": "status_change", "agent": "auth-fix", "status": "done"}
+```
+
+**Client → Server messages:**
+```json
+{"type": "spawn", "name": "auth-fix", "task": "fix the login bug"}
+{"type": "stop", "name": "auth-fix"}
+{"type": "merge", "name": "auth-fix"}
+{"type": "destroy", "name": "auth-fix"}
+```
+
+The server broadcasts state updates at 1Hz and pushes log lines as they arrive. The TUI reads the same in-memory state directly (no WebSocket needed).
+
 ## TUI Dashboard
 
 Built with Textual. Three panels:
@@ -124,6 +173,16 @@ Built with Textual. Three panels:
 - **Top:** Agent table — name, branch, ports, status, last activity. Arrow keys to select.
 - **Middle:** Live streaming logs for the selected agent.
 - **Bottom:** Keyboard shortcuts — [s]pawn, [m]erge, [k]ill, [d]estroy, [q]uit.
+
+## Web Dashboard
+
+Built with Next.js and v0. Connects to the FastAPI WebSocket server. Same information as the TUI but in a browser:
+
+- Agent table with status badges and port info
+- Live log viewer with auto-scroll
+- Spawn dialog with name + task inputs
+- Merge button with diff preview
+- Responsive layout for large screens
 
 ## Merge Flow
 
@@ -137,8 +196,8 @@ The merge agent appears as a special row in the dashboard with status `merging`.
 
 ## Scope (24-hour hackathon)
 
-- Monolith architecture
+- Layered architecture: Python core + FastAPI WebSocket + TUI + Next.js web dashboard
 - Claude Code only (no Cursor/Codex support)
 - Core happy path: spawn, monitor, merge
 - No persistence across CLI restarts
-- No web dashboard (TUI only)
+- Web dashboard built with v0 for polished UI
