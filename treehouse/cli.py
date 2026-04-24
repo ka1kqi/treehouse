@@ -168,3 +168,32 @@ def dashboard():
     from treehouse.tui.app import TreehouseApp
     tui_app = TreehouseApp(workspaces=_workspaces)
     tui_app.run()
+
+
+@app.command()
+def server(port: int = 8080):
+    """Start the WebSocket API server."""
+    import uvicorn
+    from treehouse.server.api import create_app
+    from treehouse.server.state import StateManager
+
+    state = StateManager()
+    state.workspaces = _workspaces
+    api = create_app(state)
+    typer.echo(f"Treehouse API server on http://localhost:{port}")
+    uvicorn.run(api, host="0.0.0.0", port=port)
+
+
+@app.command()
+def web():
+    """Start the Next.js web dashboard."""
+    import subprocess
+    web_dir = Path(__file__).parent.parent / "web"
+    if not web_dir.exists():
+        typer.echo("Web dashboard not found. Run from the project root.")
+        raise typer.Exit(1)
+    if not (web_dir / "node_modules").exists():
+        typer.echo("Installing web dependencies...")
+        subprocess.run(["npm", "install"], cwd=str(web_dir), check=True)
+    typer.echo("Starting web dashboard on http://localhost:3000")
+    subprocess.run(["npm", "run", "dev"], cwd=str(web_dir))
