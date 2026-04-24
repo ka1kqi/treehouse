@@ -16,9 +16,6 @@ from treehouse.core.worktree import WorktreeManager
 
 app = typer.Typer(name="treehouse", help="Parallel runtime isolation for multi-agent coding")
 
-_workspaces: dict[str, AgentWorkspace] = {}
-_port_allocator: PortAllocator | None = None
-
 
 def _get_root() -> Path:
     return Path.cwd()
@@ -28,11 +25,21 @@ def _get_config() -> TreehouseConfig:
     return TreehouseConfig.load(_get_root())
 
 
-def _get_allocator(config: TreehouseConfig) -> PortAllocator:
-    global _port_allocator
-    if _port_allocator is None:
-        _port_allocator = PortAllocator(config.base_port)
-    return _port_allocator
+def _load_workspaces(config: TreehouseConfig) -> dict[str, AgentWorkspace]:
+    return config.load_workspaces()
+
+
+def _save_workspaces(config: TreehouseConfig, workspaces: dict[str, AgentWorkspace]) -> None:
+    config.save_workspaces(workspaces)
+
+
+def _get_allocator(config: TreehouseConfig, workspaces: dict[str, AgentWorkspace]) -> PortAllocator:
+    allocator = PortAllocator(config.base_port)
+    # Fast-forward allocator past already-used ports
+    if workspaces:
+        max_port = max(ws.port_base for ws in workspaces.values())
+        allocator._next = max_port - config.base_port + 1
+    return allocator
 
 
 @app.command()
@@ -52,7 +59,8 @@ def spawn(name: str, task: str):
     """Spawn an isolated agent workspace."""
     config = _get_config()
     root = _get_root()
-    allocator = _get_allocator(config)
+    workspaces = _load_workspaces(config)
+    allocator = _get_allocator(config, workspaces)
 
     wt_mgr = WorktreeManager(root)
     wt_path = wt_mgr.create(name)
@@ -62,7 +70,7 @@ def spawn(name: str, task: str):
         name=name, task_prompt=task,
         worktree_path=wt_path, port_base=port_base,
     )
-    _workspaces[name] = workspace
+    workspaces[name] = workspace
 
     if config.compose_file:
         source_compose = root / config.compose_file
@@ -77,36 +85,32 @@ def spawn(name: str, task: str):
     port_mapping = allocator.get_port_mapping(port_base, {"app": 3000})
     rewrite_env(source_env, wt_path / ".env", port_mapping)
 
-    runner = AgentRunner()
-    asyncio.run(_spawn_agent(runner, workspace))
+    # Save state to disk
+    _save_workspaces(config, workspaces)
 
     typer.echo(f"Spawned agent '{name}' on branch treehouse/{name}")
     typer.echo(f"  Worktree: {wt_path}")
     typer.echo(f"  Port base: {port_base}")
 
 
-async def _spawn_agent(runner: AgentRunner, workspace: AgentWorkspace):
-    await runner.start(workspace)
-    await asyncio.gather(
-        runner.stream_output(workspace),
-        runner.wait(workspace),
-    )
-
-
 @app.command(name="list")
 def list_agents():
     """List all agent workspaces."""
-    if not _workspaces:
-        typer.echo("No agents running. Use 'treehouse spawn' to create one.")
+    config = _get_config()
+    workspaces = _load_workspaces(config)
+    if not workspaces:
+        typer.echo("No agents. Use 'treehouse spawn' to create one.")
         return
-    for ws in _workspaces.values():
+    for ws in workspaces.values():
         typer.echo(f"  {ws.name:<15} {ws.branch:<25} port:{ws.port_base} [{ws.status.value}]")
 
 
 @app.command()
 def merge(name: str):
     """Merge an agent's branch back to main."""
+    config = _get_config()
     root = _get_root()
+    workspaces = _load_workspaces(config)
     mgr = MergeManager(root)
     branch = f"treehouse/{name}"
     typer.echo(mgr.diff_stat(branch))
@@ -114,13 +118,22 @@ def merge(name: str):
     result = mgr.merge(branch)
     if result == MergeResult.CLEAN:
         typer.echo(f"Merged {branch} cleanly.")
+        ws = workspaces.get(name)
+        if ws:
+            from treehouse.core.models import AgentStatus
+            ws.status = AgentStatus.MERGED
+            _save_workspaces(config, workspaces)
     elif result == MergeResult.CONFLICT:
         typer.echo("Conflicts detected. Launching AI merge agent...")
-        ws = _workspaces.get(name)
+        ws = workspaces.get(name)
         task = ws.task_prompt if ws else "unknown task"
         resolved = asyncio.run(mgr.ai_resolve(name, task))
         if resolved:
             typer.echo("Conflicts resolved by AI merge agent.")
+            if ws:
+                from treehouse.core.models import AgentStatus
+                ws.status = AgentStatus.MERGED
+                _save_workspaces(config, workspaces)
         else:
             typer.echo("AI merge failed. Resolve manually.")
             mgr.abort_merge()
@@ -131,12 +144,15 @@ def merge(name: str):
 @app.command()
 def stop(name: str):
     """Stop a running agent."""
-    ws = _workspaces.get(name)
+    config = _get_config()
+    workspaces = _load_workspaces(config)
+    ws = workspaces.get(name)
     if not ws:
         typer.echo(f"No agent named '{name}'")
         raise typer.Exit(1)
-    runner = AgentRunner()
-    asyncio.run(runner.stop(ws))
+    from treehouse.core.models import AgentStatus
+    ws.status = AgentStatus.FAILED
+    _save_workspaces(config, workspaces)
     typer.echo(f"Stopped agent '{name}'")
 
 
@@ -145,11 +161,9 @@ def destroy(name: str):
     """Tear down an agent workspace and its Docker services."""
     config = _get_config()
     root = _get_root()
+    workspaces = _load_workspaces(config)
 
-    ws = _workspaces.pop(name, None)
-    if ws and ws.process:
-        runner = AgentRunner()
-        asyncio.run(runner.stop(ws))
+    workspaces.pop(name, None)
 
     if config.compose_file:
         compose_file = root / ".treehouse" / "worktrees" / name / "docker-compose.treehouse.yml"
@@ -159,14 +173,17 @@ def destroy(name: str):
 
     wt_mgr = WorktreeManager(root)
     wt_mgr.destroy(name)
+    _save_workspaces(config, workspaces)
     typer.echo(f"Destroyed workspace '{name}'")
 
 
 @app.command()
 def dashboard():
     """Launch the TUI dashboard."""
+    config = _get_config()
+    workspaces = _load_workspaces(config)
     from treehouse.tui.app import TreehouseApp
-    tui_app = TreehouseApp(workspaces=_workspaces)
+    tui_app = TreehouseApp(workspaces=workspaces)
     tui_app.run()
 
 
@@ -177,8 +194,10 @@ def server(port: int = 8080):
     from treehouse.server.api import create_app
     from treehouse.server.state import StateManager
 
+    config = _get_config()
+    workspaces = _load_workspaces(config)
     state = StateManager()
-    state.workspaces = _workspaces
+    state.workspaces = workspaces
     api = create_app(state)
     typer.echo(f"Treehouse API server on http://localhost:{port}")
     uvicorn.run(api, host="0.0.0.0", port=port)

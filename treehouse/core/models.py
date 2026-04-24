@@ -36,3 +36,27 @@ class AgentWorkspace:
             self.branch = f"treehouse/{self.name}"
         if not self.compose_project:
             self.compose_project = f"treehouse_{self.name.replace('-', '_')}"
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "task_prompt": self.task_prompt,
+            "worktree_path": str(self.worktree_path),
+            "port_base": self.port_base,
+            "branch": self.branch,
+            "compose_project": self.compose_project,
+            "status": self.status.value,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> AgentWorkspace:
+        ws = cls(
+            name=data["name"],
+            task_prompt=data["task_prompt"],
+            worktree_path=Path(data["worktree_path"]),
+            port_base=data["port_base"],
+            branch=data.get("branch", ""),
+            compose_project=data.get("compose_project", ""),
+            status=AgentStatus(data.get("status", "pending")),
+        )
+        return ws

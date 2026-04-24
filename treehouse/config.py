@@ -4,8 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 import yaml
 
+from treehouse.core.models import AgentWorkspace
+
 CONFIG_DIR = ".treehouse"
 CONFIG_FILE = "config.yml"
+WORKSPACES_FILE = "workspaces.yml"
 
 
 @dataclass
@@ -52,3 +55,17 @@ class TreehouseConfig:
                 "compose_file": self.compose_file,
                 "env_file": self.env_file,
             }, f)
+
+    def save_workspaces(self, workspaces: dict[str, AgentWorkspace]) -> None:
+        ws_path = self.root / CONFIG_DIR / WORKSPACES_FILE
+        data = {name: ws.to_dict() for name, ws in workspaces.items()}
+        with open(ws_path, "w") as f:
+            yaml.dump(data, f, default_flow_style=False)
+
+    def load_workspaces(self) -> dict[str, AgentWorkspace]:
+        ws_path = self.root / CONFIG_DIR / WORKSPACES_FILE
+        if not ws_path.exists():
+            return {}
+        with open(ws_path) as f:
+            data = yaml.safe_load(f) or {}
+        return {name: AgentWorkspace.from_dict(ws_data) for name, ws_data in data.items()}
