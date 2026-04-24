@@ -11,10 +11,9 @@ class AgentRunner:
     def build_command(self, workspace: AgentWorkspace) -> list[str]:
         return [
             "claude",
-            "--print",
+            "-p",
             "--output-format", "stream-json",
-            "--dangerously-skip-permissions",
-            "--add-dir", str(workspace.worktree_path),
+            "--verbose",
             workspace.task_prompt,
         ]
 
@@ -37,24 +36,42 @@ class AgentRunner:
         return None
 
     async def start(self, workspace: AgentWorkspace) -> None:
+        import os
         cmd = self.build_command(workspace)
+        env = os.environ.copy()
+        env.pop("CLAUDECODE", None)  # allow nested claude sessions
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(workspace.worktree_path),
+            env=env,
         )
         workspace.process = process
         workspace.status = AgentStatus.RUNNING
 
     async def stream_output(self, workspace: AgentWorkspace) -> None:
-        if not workspace.process or not workspace.process.stdout:
+        if not workspace.process:
             return
-        async for raw_line in workspace.process.stdout:
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            parsed = self.parse_output_line(line)
-            if parsed:
-                workspace.log_buffer.append(parsed)
+
+        async def _read_stream(stream, prefix=""):
+            async for raw_line in stream:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if prefix:
+                    if line:
+                        workspace.log_buffer.append(f"{prefix}{line}")
+                else:
+                    parsed = self.parse_output_line(line)
+                    if parsed:
+                        workspace.log_buffer.append(parsed)
+
+        tasks = []
+        if workspace.process.stdout:
+            tasks.append(_read_stream(workspace.process.stdout))
+        if workspace.process.stderr:
+            tasks.append(_read_stream(workspace.process.stderr, prefix="STDERR: "))
+        if tasks:
+            await asyncio.gather(*tasks)
 
     async def wait(self, workspace: AgentWorkspace) -> None:
         if not workspace.process:

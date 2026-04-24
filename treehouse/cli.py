@@ -7,7 +7,7 @@ import typer
 
 from treehouse.config import TreehouseConfig
 from treehouse.core.agent import AgentRunner
-from treehouse.core.docker import DockerManager
+from treehouse.core.docker import ComposeGenerator, DockerManager
 from treehouse.core.env import rewrite_env
 from treehouse.core.merger import MergeManager, MergeResult
 from treehouse.core.models import AgentWorkspace
@@ -72,17 +72,24 @@ def spawn(name: str, task: str):
     )
     workspaces[name] = workspace
 
-    if config.compose_file:
-        source_compose = root / config.compose_file
-        if source_compose.exists():
-            docker_mgr = DockerManager(source_compose)
-            port_mapping = allocator.get_port_mapping(port_base, {"app": 3000})
-            compose_out = wt_path / "docker-compose.treehouse.yml"
-            docker_mgr.generate(compose_out, workspace.compose_project, port_mapping)
-            docker_mgr.start(compose_out, workspace.compose_project)
+    # Auto-generate or use existing compose
+    compose_out = wt_path / "docker-compose.treehouse.yml"
+    if config.compose_file and (root / config.compose_file).exists():
+        generator = ComposeGenerator()
+        _, port_defaults = generator.detect(root)
+        port_mapping = allocator.get_port_mapping(port_base, port_defaults or {"app": 3000})
+        docker_mgr = DockerManager(root / config.compose_file)
+        docker_mgr.generate(compose_out, workspace.compose_project, port_mapping)
+    else:
+        generator = ComposeGenerator()
+        port_defaults = generator.generate(root, compose_out)
+        port_mapping = allocator.get_port_mapping(port_base, port_defaults or {"app": 3000})
+        docker_mgr = DockerManager(compose_out)
+        docker_mgr.generate(compose_out, workspace.compose_project, port_mapping)
+
+    docker_mgr.start(compose_out, workspace.compose_project)
 
     source_env = root / config.env_file if (root / config.env_file).exists() else None
-    port_mapping = allocator.get_port_mapping(port_base, {"app": 3000})
     rewrite_env(source_env, wt_path / ".env", port_mapping)
 
     # Save state to disk

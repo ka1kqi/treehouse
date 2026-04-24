@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from pathlib import Path
 
 from textual.app import App, ComposeResult
@@ -9,6 +10,7 @@ from textual.widgets import Footer, Header
 
 from treehouse.config import TreehouseConfig
 from treehouse.core.agent import AgentRunner
+from treehouse.core.docker import ComposeGenerator, DockerManager
 from treehouse.core.env import rewrite_env
 from treehouse.core.models import AgentStatus, AgentWorkspace
 from treehouse.core.ports import PortAllocator
@@ -31,6 +33,7 @@ class TreehouseApp(App):
 
     BINDINGS = [
         ("s", "spawn", "Spawn"),
+        ("e", "enter_sandbox", "Enter"),
         ("m", "merge", "Merge"),
         ("k", "kill", "Kill"),
         ("d", "destroy_agent", "Destroy"),
@@ -101,9 +104,31 @@ class TreehouseApp(App):
             wt_path = wt_mgr.create(name)
             port_base = allocator.allocate()
 
+            # Auto-generate or use existing compose
+            compose_out = wt_path / "docker-compose.treehouse.yml"
+            ws_project = f"treehouse_{name.replace('-', '_')}"
+
+            if config.compose_file and (config.root / config.compose_file).exists():
+                # Use existing compose file as base
+                generator = ComposeGenerator()
+                _, port_defaults = generator.detect(config.root)
+                port_mapping = allocator.get_port_mapping(port_base, port_defaults or {"app": 3000})
+                docker_mgr = DockerManager(config.root / config.compose_file)
+                docker_mgr.generate(compose_out, ws_project, port_mapping)
+            else:
+                # Auto-generate from project detection
+                generator = ComposeGenerator()
+                port_defaults = generator.generate(config.root, compose_out)
+                port_mapping = allocator.get_port_mapping(port_base, port_defaults or {"app": 3000})
+                # Rewrite ports in the generated file
+                docker_mgr = DockerManager(compose_out)
+                docker_mgr.generate(compose_out, ws_project, port_mapping)
+
+            # Start containers
+            docker_mgr.start(compose_out, ws_project)
+
             # Env rewriting
             source_env = config.root / config.env_file if (config.root / config.env_file).exists() else None
-            port_mapping = allocator.get_port_mapping(port_base, {"app": 3000})
             rewrite_env(source_env, wt_path / ".env", port_mapping)
 
             ws = AgentWorkspace(
@@ -128,9 +153,26 @@ class TreehouseApp(App):
                 runner.stream_output(workspace),
                 runner.wait(workspace),
             )
-        except Exception:
+        except Exception as e:
             workspace.status = AgentStatus.FAILED
+            workspace.log_buffer.append(f"ERROR: {e}")
+            self.call_from_thread(self.notify, f"Agent failed: {e}", severity="error")
         self._save()
+
+    def action_enter_sandbox(self) -> None:
+        table = self.query_one(AgentTable)
+        name = table.selected_agent
+        if not name or name not in self.workspaces:
+            self.notify("No agent selected", severity="warning")
+            return
+        ws = self.workspaces[name]
+        wt_path = str(ws.worktree_path)
+        with self.suspend():
+            subprocess.run(
+                ["zsh", "-i"],
+                cwd=wt_path,
+                env={**__import__("os").environ, "TREEHOUSE_AGENT": name},
+            )
 
     def action_merge(self) -> None:
         table = self.query_one(AgentTable)
@@ -141,10 +183,20 @@ class TreehouseApp(App):
         table = self.query_one(AgentTable)
         name = table.selected_agent
         if not name or name not in self.workspaces:
+            self.notify("No agent selected", severity="warning")
             return
         ws = self.workspaces[name]
         if ws.process:
             ws.process.terminate()
+        # Stop Docker services
+        try:
+            compose_file = ws.worktree_path / "docker-compose.treehouse.yml"
+            if compose_file.exists():
+                config = self._get_config()
+                docker_mgr = DockerManager(config.root / config.compose_file)
+                docker_mgr.stop(compose_file, ws.compose_project)
+        except Exception:
+            pass
         ws.status = AgentStatus.FAILED
         self._save()
         self.notify(f"Killed '{name}'")
@@ -153,14 +205,27 @@ class TreehouseApp(App):
         table = self.query_one(AgentTable)
         name = table.selected_agent
         if not name or name not in self.workspaces:
+            self.notify("No agent selected", severity="warning")
             return
         try:
             config = self._get_config()
             ws = self.workspaces.pop(name)
             if ws.process:
                 ws.process.terminate()
-            wt_mgr = WorktreeManager(config.root)
-            wt_mgr.destroy(name)
+            # Stop Docker services
+            try:
+                compose_file = ws.worktree_path / "docker-compose.treehouse.yml"
+                if compose_file.exists():
+                    docker_mgr = DockerManager(config.root / config.compose_file)
+                    docker_mgr.stop(compose_file, ws.compose_project)
+            except Exception:
+                pass
+            # Remove worktree
+            try:
+                wt_mgr = WorktreeManager(config.root)
+                wt_mgr.destroy(name)
+            except Exception:
+                pass  # worktree may not exist
             self._save()
             self.notify(f"Destroyed '{name}'")
         except Exception as e:

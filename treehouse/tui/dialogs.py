@@ -8,6 +8,7 @@ from textual.widgets import Button, Input, Label
 
 
 class SpawnDialog(ModalScreen[tuple[str, str] | None]):
+    BINDINGS = [("escape", "cancel", "Cancel")]
     CSS = """
     SpawnDialog {
         align: center middle;
@@ -30,6 +31,9 @@ class SpawnDialog(ModalScreen[tuple[str, str] | None]):
             yield Input(id="agent-task", placeholder="fix the login bug")
             yield Button("Spawn", variant="primary", id="spawn-btn")
             yield Button("Cancel", id="cancel-btn")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "spawn-btn":
