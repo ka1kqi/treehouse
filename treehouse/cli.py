@@ -123,6 +123,79 @@ async def _run_cli_agent(runner: AgentRunner, workspace: AgentWorkspace, config:
     typer.echo(f"  Agent '{workspace.name}' finished with status: {workspace.status.value}")
 
 
+@app.command()
+def orchestrate(task: str):
+    """Decompose a high-level task and spawn parallel agents."""
+    config = _get_config()
+    root = _get_root()
+    workspaces = _load_workspaces(config)
+
+    typer.echo(f"Decomposing task: {task}")
+    runner = AgentRunner()
+    subtasks = asyncio.run(runner.decompose_task(task, str(root)))
+
+    typer.echo(f"Plan ({len(subtasks)} subtasks):")
+    for name, sub in subtasks:
+        typer.echo(f"  - {name}: {sub[:80]}")
+
+    allocator = _get_allocator(config, workspaces)
+    wt_mgr = WorktreeManager(root)
+
+    agent_runs = []
+    for name, sub in subtasks:
+        # Avoid name collisions
+        final_name = name
+        counter = 2
+        while final_name in workspaces:
+            final_name = f"{name}-{counter}"
+            counter += 1
+
+        wt_path = wt_mgr.create(final_name)
+        port_base = allocator.allocate()
+
+        ws = AgentWorkspace(
+            name=final_name, task_prompt=sub,
+            worktree_path=wt_path, port_base=port_base,
+        )
+        workspaces[final_name] = ws
+
+        # Docker setup
+        compose_out = wt_path / "docker-compose.treehouse.yml"
+        if config.compose_file and (root / config.compose_file).exists():
+            generator = ComposeGenerator()
+            _, port_defaults = generator.detect(root)
+            port_mapping = allocator.get_port_mapping(port_base, port_defaults or {"app": 3000})
+            docker_mgr = DockerManager(root / config.compose_file)
+            docker_mgr.generate(compose_out, ws.compose_project, port_mapping)
+        else:
+            generator = ComposeGenerator()
+            port_defaults = generator.generate(root, compose_out)
+            port_mapping = allocator.get_port_mapping(port_base, port_defaults or {"app": 3000})
+            docker_mgr = DockerManager(compose_out)
+            docker_mgr.generate(compose_out, ws.compose_project, port_mapping)
+
+        try:
+            docker_mgr.start(compose_out, ws.compose_project)
+        except Exception as e:
+            typer.echo(f"  Docker failed for {final_name} (non-fatal): {e}")
+
+        source_env = root / config.env_file if (root / config.env_file).exists() else None
+        rewrite_env(source_env, wt_path / ".env", port_mapping)
+
+        typer.echo(f"Spawned '{final_name}' on port {port_base}")
+        agent_runs.append(_run_cli_agent(runner, ws, config, workspaces))
+
+    _save_workspaces(config, workspaces)
+
+    typer.echo(f"Launching {len(agent_runs)} agents in parallel...")
+    asyncio.run(_run_all(agent_runs))
+    typer.echo("All orchestrated agents finished.")
+
+
+async def _run_all(coros: list) -> None:
+    await asyncio.gather(*coros)
+
+
 @app.command(name="list")
 def list_agents():
     """List all agent workspaces."""
@@ -195,14 +268,20 @@ def destroy(name: str):
 
     workspaces.pop(name, None)
 
-    if config.compose_file:
-        compose_file = root / ".treehouse" / "worktrees" / name / "docker-compose.treehouse.yml"
-        if compose_file.exists():
-            docker_mgr = DockerManager(root / config.compose_file)
+    # Stop Docker containers
+    compose_file = root / ".treehouse" / "worktrees" / name / "docker-compose.treehouse.yml"
+    if compose_file.exists():
+        try:
+            docker_mgr = DockerManager(compose_file)
             docker_mgr.stop(compose_file, f"treehouse_{name.replace('-', '_')}")
+        except Exception:
+            pass
 
     wt_mgr = WorktreeManager(root)
-    wt_mgr.destroy(name)
+    try:
+        wt_mgr.destroy(name)
+    except Exception:
+        pass
     _save_workspaces(config, workspaces)
     typer.echo(f"Destroyed workspace '{name}'")
 

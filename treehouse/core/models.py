@@ -31,6 +31,7 @@ class AgentWorkspace:
     status: AgentStatus = AgentStatus.PENDING
     process: asyncio.subprocess.Process | None = None
     log_buffer: deque[str] = field(default_factory=lambda: deque(maxlen=500))
+    output_buffer: deque[str] = field(default_factory=lambda: deque(maxlen=500))
 
     def __post_init__(self):
         if not self.branch:
