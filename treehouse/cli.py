@@ -124,7 +124,14 @@ async def _run_cli_agent(runner: AgentRunner, workspace: AgentWorkspace, config:
 
 
 @app.command()
-def orchestrate(task: str):
+def orchestrate(
+    task: str,
+    auto_merge: bool = typer.Option(
+        True,
+        "--merge/--no-merge",
+        help="Sequentially merge each agent's branch back to the current branch when all agents finish.",
+    ),
+):
     """Decompose a high-level task and spawn parallel agents."""
     config = _get_config()
     root = _get_root()
@@ -142,6 +149,7 @@ def orchestrate(task: str):
     wt_mgr = WorktreeManager(root)
 
     agent_runs = []
+    spawned: list[AgentWorkspace] = []
     for name, sub in subtasks:
         # Avoid name collisions
         final_name = name
@@ -158,6 +166,7 @@ def orchestrate(task: str):
             worktree_path=wt_path, port_base=port_base,
         )
         workspaces[final_name] = ws
+        spawned.append(ws)
 
         # Docker setup
         compose_out = wt_path / "docker-compose.treehouse.yml"
@@ -188,12 +197,81 @@ def orchestrate(task: str):
     _save_workspaces(config, workspaces)
 
     typer.echo(f"Launching {len(agent_runs)} agents in parallel...")
-    asyncio.run(_run_all(agent_runs))
-    typer.echo("All orchestrated agents finished.")
+    mgr = MergeManager(root) if auto_merge else None
+    save = lambda: _save_workspaces(config, workspaces)
+    asyncio.run(_orchestrate_agents(agent_runs, mgr, spawned, save))
+
+    if auto_merge:
+        merged = sum(1 for ws in spawned if ws.status == AgentStatus.MERGED)
+        typer.echo(f"\nDone. {merged}/{len(spawned)} agents merged.")
+    else:
+        typer.echo(
+            "All orchestrated agents finished. "
+            "Run `treehouse merge <name>` to integrate each."
+        )
 
 
 async def _run_all(coros: list) -> None:
     await asyncio.gather(*coros)
+
+
+async def _orchestrate_agents(
+    coros: list,
+    mgr: MergeManager | None,
+    spawned: list[AgentWorkspace],
+    save,
+) -> None:
+    await asyncio.gather(*coros)
+    if mgr is not None:
+        await _merge_spawned(mgr, spawned, save)
+
+
+async def _merge_spawned(
+    mgr: MergeManager,
+    spawned: list[AgentWorkspace],
+    save,
+) -> int:
+    """Sequentially merge each DONE agent's branch. Returns count merged.
+
+    On clean merge: marks workspace MERGED.
+    On conflict: invokes the AI conflict resolver. On AI failure, aborts the
+    merge and stops (the repo is left clean; remaining agents are skipped so
+    the user can intervene).
+    """
+    merged = 0
+    for ws in spawned:
+        if ws.status != AgentStatus.DONE:
+            typer.echo(f"  skip merge of '{ws.name}' (status: {ws.status.value})")
+            continue
+        typer.echo(f"\nMerging {ws.branch}...")
+        stat = mgr.diff_stat(ws.branch).rstrip()
+        if stat:
+            typer.echo(stat)
+        result = mgr.merge(ws.branch)
+        if result == MergeResult.CLEAN:
+            ws.status = AgentStatus.MERGED
+            save()
+            merged += 1
+            typer.echo("  ✓ merged cleanly")
+        elif result == MergeResult.CONFLICT:
+            typer.echo("  ⚠ conflicts — invoking AI merger")
+            resolved = await mgr.ai_resolve(ws.name, ws.task_prompt)
+            if resolved:
+                ws.status = AgentStatus.MERGED
+                save()
+                merged += 1
+                typer.echo("  ✓ resolved by AI merger")
+            else:
+                typer.echo(
+                    f"  ✗ AI merge failed; aborting. "
+                    f"Resolve '{ws.name}' manually with `treehouse merge {ws.name}`."
+                )
+                mgr.abort_merge()
+                break
+        else:
+            typer.echo(f"  ✗ merge of {ws.branch} failed; stopping")
+            break
+    return merged
 
 
 @app.command(name="list")
