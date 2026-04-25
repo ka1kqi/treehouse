@@ -68,7 +68,14 @@ def test_agent_service_has_required_fields():
     # Auth pass-through is by reference, not value: the key never enters
     # the compose file as a literal, only as a name to inherit from host.
     assert "ANTHROPIC_API_KEY" in svc["environment"]
+    assert "HOME=/home/agent" in svc["environment"]
     assert svc["restart"] == "no"
+    # Host UID/GID baked in so the agent doesn't run as root (claude refuses
+    # bypassPermissions under root) and so files written to the bind-mounted
+    # worktree end up owned by the host user.
+    assert ":" in svc["user"]
+    uid, gid = svc["user"].split(":")
+    assert uid == str(os.getuid()) and gid == str(os.getgid())
 
 
 def test_agent_service_yaml_round_trips_with_unusual_prompt():
@@ -84,16 +91,21 @@ def test_agent_service_yaml_round_trips_with_unusual_prompt():
     assert parsed["command"][-1] == prompt
 
 
-def test_agent_service_mounts_claude_dir_when_present(tmp_path, monkeypatch):
+def test_agent_service_mounts_claude_state_when_present(tmp_path, monkeypatch):
     fake_home = tmp_path / "home"
-    (fake_home / ".claude").mkdir(parents=True)
+    fake_home.mkdir()
+    (fake_home / ".claude").mkdir()
+    (fake_home / ".claude.json").write_text("{}")
     monkeypatch.setenv("HOME", str(fake_home))
     svc = agent_service("noop")
-    mounts = [v for v in svc["volumes"] if "/root/.claude" in v]
-    assert mounts and mounts[0].endswith(":/root/.claude:ro")
+    # Both the directory of secondary state and the per-session config file
+    # are mounted into the container's HOME (/home/agent).
+    dir_mount = [v for v in svc["volumes"] if v.endswith("/home/agent/.claude")]
+    json_mount = [v for v in svc["volumes"] if v.endswith("/home/agent/.claude.json")]
+    assert dir_mount and json_mount
 
 
-def test_agent_service_skips_claude_mount_when_absent(tmp_path, monkeypatch):
+def test_agent_service_skips_claude_mounts_when_absent(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "no-claude-here"))
     svc = agent_service("noop")
-    assert not any("/root/.claude" in v for v in svc["volumes"])
+    assert not any("/home/agent/.claude" in v for v in svc["volumes"])

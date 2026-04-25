@@ -13,7 +13,8 @@ AGENT_IMAGE_TAG = "treehouse-agent:0.1"
 _DOCKERFILE = b"""\
 FROM node:20-alpine
 RUN apk add --no-cache git ca-certificates curl bash && \\
-    npm install -g @anthropic-ai/claude-code
+    npm install -g @anthropic-ai/claude-code && \\
+    mkdir -p /home/agent && chmod 777 /home/agent
 WORKDIR /workspace
 """
 
@@ -44,25 +45,45 @@ def ensure_agent_image(tag: str = AGENT_IMAGE_TAG) -> str:
 def agent_service(task_prompt: str, image: str = AGENT_IMAGE_TAG) -> dict:
     """Compose service definition for a Claude Code agent.
 
-    Mounts the worktree at /workspace, passes through ANTHROPIC_API_KEY +
-    CLAUDE_API_KEY from the host, and conditionally bind-mounts the host's
-    ~/.claude (read-only) so OAuth-based auth works without a separate API key.
-    Either credential path satisfies the CLI; whichever the user has set up
-    will succeed at runtime.
+    The container runs as the host user's UID/GID so files written to the
+    bind-mounted worktree end up owned by the host user (not root). claude
+    refuses bypassPermissions when running as root, which is also why we
+    must avoid the default UID 0.
+
+    Auth: passes through ANTHROPIC_API_KEY/CLAUDE_API_KEY from the host's env
+    (the API key never enters the compose file as a literal — only the
+    variable name). When the host has OAuth credentials in mountable files
+    (~/.claude.json + ~/.claude/), they're bind-mounted into the container's
+    HOME so the CLI finds them. Mounted RW so token refreshes can write back.
+
+    macOS caveat: Claude Code on macOS stores OAuth tokens in the system
+    Keychain (`Claude Code-credentials`), not in ~/.claude.json. The keychain
+    can't be bind-mounted, so OAuth-only macOS users must set
+    ANTHROPIC_API_KEY explicitly to use container mode. On Linux, where the
+    CLI stores tokens in ~/.claude.json, the bind mount is sufficient on
+    its own.
     """
     volumes = [".:/workspace"]
-    claude_dir = os.path.expanduser("~/.claude")
+    home = os.path.expanduser("~")
+    claude_json = os.path.join(home, ".claude.json")
+    claude_dir = os.path.join(home, ".claude")
+    if os.path.isfile(claude_json):
+        volumes.append(f"{claude_json}:/home/agent/.claude.json")
     if os.path.isdir(claude_dir):
-        volumes.append(f"{claude_dir}:/root/.claude:ro")
+        volumes.append(f"{claude_dir}:/home/agent/.claude")
 
     return {
         "image": image,
+        # Bake host UID/GID into the compose file so files are owned correctly
+        # under the bind mount. The compose file is per-workspace and not
+        # committed, so machine-specific values are fine.
+        "user": f"{os.getuid()}:{os.getgid()}",
         "working_dir": "/workspace",
         "volumes": volumes,
-        # List form: pass values through from the host's environment.
-        # Compose treats undefined vars as empty (which the CLI will reject
-        # with a clear "no credentials" error — desired behavior).
+        # List entries with `KEY=value` set explicit values; bare `KEY` passes
+        # through from the host's shell at compose-up time.
         "environment": [
+            "HOME=/home/agent",
             "ANTHROPIC_API_KEY",
             "CLAUDE_API_KEY",
             "ANTHROPIC_BASE_URL",
