@@ -8,22 +8,27 @@ Treehouse spawns fully isolated workspaces for AI coding agents -- each gets its
 
 ```
 pip install -e .
+export ANTHROPIC_API_KEY=...                # required for container mode on macOS
 cd your-project
 treehouse init
+treehouse orchestrate "add OAuth + tests + update README"   # parallel agents, auto-merge
+# or, single agent:
 treehouse spawn auth-fix "fix the login bug"
-treehouse spawn ui-hero "redesign the hero section"
 treehouse dashboard
 ```
+
+Full guide: [docs/USER_MANUAL.md](docs/USER_MANUAL.md). Architecture: [docs/Overview.md](docs/Overview.md).
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `treehouse init` | Initialize in current repo |
-| `treehouse spawn <name> "<task>"` | Create workspace + launch agent |
+| `treehouse orchestrate "<task>"` | Decompose into subtasks, spawn parallel agents, auto-merge |
+| `treehouse spawn <name> "<task>"` | Create workspace + launch a single agent |
 | `treehouse list` | List all agents and status |
 | `treehouse stop <name>` | Stop a running agent |
-| `treehouse merge <name>` | Merge agent's branch back |
+| `treehouse merge <name>` | Merge agent's branch back (AI conflict resolution) |
 | `treehouse destroy <name>` | Tear down workspace + containers |
 | `treehouse dashboard` | Launch the TUI dashboard |
 
