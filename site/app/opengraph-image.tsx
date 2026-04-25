@@ -170,8 +170,8 @@ export default async function Image() {
               maxWidth: 880,
             }}
           >
-            An orchestrator decomposes a task into parallel agents, each in
-            an isolated worktree and Docker project — then merges them back.
+            An orchestrator decomposes a task into parallel agents — each in
+            its own container and worktree — then merges them back.
           </span>
         </div>
 

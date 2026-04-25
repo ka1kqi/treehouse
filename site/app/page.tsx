@@ -30,9 +30,9 @@ export default function Page() {
               for multi-agent coding.
             </h1>
             <p className="mt-6 max-w-xl text-pretty text-[13px] leading-relaxed text-fg/70 sm:text-sm">
-              An orchestrator decomposes a task into parallel agents, each in
-              an isolated worktree and Docker project — then merges their work
-              back with AI-assisted conflict resolution.
+              An orchestrator decomposes a task into parallel agents — each in
+              its own container and git worktree — then merges their work back
+              with AI-assisted conflict resolution.
             </p>
           </div>
 
@@ -82,7 +82,7 @@ export default function Page() {
             <Step
               num="02"
               label="ISOLATE"
-              body="Each agent gets a git worktree on its own branch, a Docker Compose project with remapped ports, and a rewritten .env."
+              body="Each agent runs in its own container, in a git worktree on a dedicated branch, with a Docker Compose project on remapped ports and a rewritten .env."
             />
             <Step
               num="03"
