@@ -6,7 +6,7 @@ from pathlib import Path
 import typer
 
 from treehouse.config import TreehouseConfig
-from treehouse.core.agent import AgentRunner
+from treehouse.core.agent import AgentRunner, commit_workspace_if_dirty
 from treehouse.core.agent_image import ensure_agent_image
 from treehouse.core.docker import ComposeGenerator, DockerManager
 from treehouse.core.env import rewrite_env
@@ -135,6 +135,10 @@ async def _run_cli_agent(runner: AgentRunner, workspace: AgentWorkspace, config:
     except Exception as e:
         workspace.status = AgentStatus.FAILED
         typer.echo(f"  Agent failed: {e}")
+    # Snapshot uncommitted edits so the merge has something to integrate.
+    # No-op for committed-or-clean worktrees and for non-DONE statuses.
+    if commit_workspace_if_dirty(workspace):
+        typer.echo(f"  Auto-committed agent changes on {workspace.branch}")
     _save_workspaces(config, workspaces)
     typer.echo(f"  Agent '{workspace.name}' finished with status: {workspace.status.value}")
 

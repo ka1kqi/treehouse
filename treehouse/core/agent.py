@@ -3,8 +3,77 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 
 from treehouse.core.models import AgentStatus, AgentWorkspace
+
+
+def commit_workspace_if_dirty(workspace: AgentWorkspace) -> bool:
+    """Stage and commit any changes the agent left uncommitted in its worktree.
+
+    Without this, agents that edit files but skip `git commit` produce empty
+    branches — `treehouse merge` is then a silent no-op and the work is lost.
+
+    Only commits on AgentStatus.DONE so partial state from FAILED runs stays
+    visible for inspection. Configures a local agent identity if neither the
+    worktree nor the user's global git config has user.email set, so the
+    commit doesn't fail with "Author identity unknown".
+
+    Returns True if a commit was made.
+    """
+    if workspace.status != AgentStatus.DONE:
+        return False
+
+    wt = str(workspace.worktree_path)
+    status = subprocess.run(
+        ["git", "-C", wt, "status", "--porcelain"],
+        capture_output=True, text=True,
+    )
+    if not status.stdout.strip():
+        return False  # nothing to commit
+
+    # Ensure committer identity exists (worktree-local, doesn't touch global config).
+    email = subprocess.run(
+        ["git", "-C", wt, "config", "user.email"],
+        capture_output=True, text=True,
+    )
+    if email.returncode != 0 or not email.stdout.strip():
+        subprocess.run(
+            ["git", "-C", wt, "config", "user.email", "agent@treehouse"],
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", wt, "config", "user.name", f"treehouse/{workspace.name}"],
+            capture_output=True,
+        )
+
+    # Treehouse-generated artifacts in the worktree must not ride into the
+    # merged branch: docker-compose.treehouse.yml is per-workspace boilerplate
+    # and .env was rewritten with this agent's port mappings (not the user's
+    # canonical .env content).
+    subprocess.run(
+        ["git", "-C", wt, "add", "-A", "--",
+         ".",
+         ":(exclude)docker-compose.treehouse.yml",
+         ":(exclude).env"],
+        capture_output=True,
+    )
+    # If only excluded files were dirty, the staging area is now empty —
+    # nothing meaningful to commit.
+    diff_cached = subprocess.run(
+        ["git", "-C", wt, "diff", "--cached", "--quiet"],
+        capture_output=True,
+    )
+    if diff_cached.returncode == 0:
+        return False
+
+    summary = workspace.task_prompt.strip().replace("\n", " ")[:72]
+    msg = f"agent({workspace.name}): {summary}"
+    commit = subprocess.run(
+        ["git", "-C", wt, "commit", "-m", msg],
+        capture_output=True, text=True,
+    )
+    return commit.returncode == 0
 
 
 DECOMPOSE_PROMPT = """\
