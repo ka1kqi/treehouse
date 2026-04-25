@@ -7,6 +7,7 @@ import typer
 
 from treehouse.config import TreehouseConfig
 from treehouse.core.agent import AgentRunner
+from treehouse.core.agent_image import ensure_agent_image
 from treehouse.core.docker import ComposeGenerator, DockerManager
 from treehouse.core.env import rewrite_env
 from treehouse.core.merger import MergeManager, MergeResult
@@ -55,12 +56,24 @@ def init():
 
 
 @app.command()
-def spawn(name: str, task: str):
+def spawn(
+    name: str,
+    task: str,
+    containerized: bool = typer.Option(
+        True,
+        "--containerized/--host",
+        help="Run the agent inside its compose `agent` service (default) or as a host subprocess.",
+    ),
+):
     """Spawn an isolated agent workspace."""
     config = _get_config()
     root = _get_root()
     workspaces = _load_workspaces(config)
     allocator = _get_allocator(config, workspaces)
+
+    if containerized:
+        typer.echo("Ensuring agent image is built...")
+        ensure_agent_image()
 
     wt_mgr = WorktreeManager(root)
     wt_path = wt_mgr.create(name)
@@ -72,6 +85,8 @@ def spawn(name: str, task: str):
     )
     workspaces[name] = workspace
 
+    agent_task = task if containerized else None
+
     # Auto-generate or use existing compose
     compose_out = wt_path / "docker-compose.treehouse.yml"
     if config.compose_file and (root / config.compose_file).exists():
@@ -79,10 +94,10 @@ def spawn(name: str, task: str):
         _, port_defaults = generator.detect(root)
         port_mapping = allocator.get_port_mapping(port_base, port_defaults or {"app": 3000})
         docker_mgr = DockerManager(root / config.compose_file)
-        docker_mgr.generate(compose_out, workspace.compose_project, port_mapping)
+        docker_mgr.generate(compose_out, workspace.compose_project, port_mapping, agent_task=agent_task)
     else:
         generator = ComposeGenerator()
-        port_defaults = generator.generate(root, compose_out)
+        port_defaults = generator.generate(root, compose_out, agent_task=agent_task)
         port_mapping = allocator.get_port_mapping(port_base, port_defaults or {"app": 3000})
         docker_mgr = DockerManager(compose_out)
         docker_mgr.generate(compose_out, workspace.compose_project, port_mapping)
@@ -101,10 +116,11 @@ def spawn(name: str, task: str):
     typer.echo(f"Spawned agent '{name}' on branch treehouse/{name}")
     typer.echo(f"  Worktree: {wt_path}")
     typer.echo(f"  Port base: {port_base}")
+    typer.echo(f"  Mode: {'container' if containerized else 'host'}")
 
     # Launch Claude agent
-    typer.echo(f"  Launching Claude agent...")
-    runner = AgentRunner()
+    typer.echo("  Launching Claude agent...")
+    runner = AgentRunner(containerized=containerized)
     asyncio.run(_run_cli_agent(runner, workspace, config, workspaces))
 
 
@@ -131,15 +147,27 @@ def orchestrate(
         "--merge/--no-merge",
         help="Sequentially merge each agent's branch back to the current branch when all agents finish.",
     ),
+    containerized: bool = typer.Option(
+        True,
+        "--containerized/--host",
+        help="Run each subagent inside its compose `agent` service (default) or as a host subprocess.",
+    ),
 ):
     """Decompose a high-level task and spawn parallel agents."""
     config = _get_config()
     root = _get_root()
     workspaces = _load_workspaces(config)
 
+    if containerized:
+        typer.echo("Ensuring agent image is built...")
+        ensure_agent_image()
+
     typer.echo(f"Decomposing task: {task}")
-    runner = AgentRunner()
-    subtasks = asyncio.run(runner.decompose_task(task, str(root)))
+    # Decomposition runs on the host — it's a one-shot CLI call to inherit
+    # the user's `claude` auth without spinning up a container.
+    runner = AgentRunner(containerized=containerized)
+    decompose_runner = AgentRunner(containerized=False)
+    subtasks = asyncio.run(decompose_runner.decompose_task(task, str(root)))
 
     typer.echo(f"Plan ({len(subtasks)} subtasks):")
     for name, sub in subtasks:
@@ -168,6 +196,8 @@ def orchestrate(
         workspaces[final_name] = ws
         spawned.append(ws)
 
+        agent_task = sub if containerized else None
+
         # Docker setup
         compose_out = wt_path / "docker-compose.treehouse.yml"
         if config.compose_file and (root / config.compose_file).exists():
@@ -175,10 +205,10 @@ def orchestrate(
             _, port_defaults = generator.detect(root)
             port_mapping = allocator.get_port_mapping(port_base, port_defaults or {"app": 3000})
             docker_mgr = DockerManager(root / config.compose_file)
-            docker_mgr.generate(compose_out, ws.compose_project, port_mapping)
+            docker_mgr.generate(compose_out, ws.compose_project, port_mapping, agent_task=agent_task)
         else:
             generator = ComposeGenerator()
-            port_defaults = generator.generate(root, compose_out)
+            port_defaults = generator.generate(root, compose_out, agent_task=agent_task)
             port_mapping = allocator.get_port_mapping(port_base, port_defaults or {"app": 3000})
             docker_mgr = DockerManager(compose_out)
             docker_mgr.generate(compose_out, ws.compose_project, port_mapping)
@@ -191,7 +221,7 @@ def orchestrate(
         source_env = root / config.env_file if (root / config.env_file).exists() else None
         rewrite_env(source_env, wt_path / ".env", port_mapping)
 
-        typer.echo(f"Spawned '{final_name}' on port {port_base}")
+        typer.echo(f"Spawned '{final_name}' on port {port_base} ({'container' if containerized else 'host'})")
         agent_runs.append(_run_cli_agent(runner, ws, config, workspaces))
 
     _save_workspaces(config, workspaces)

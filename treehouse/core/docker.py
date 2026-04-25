@@ -5,6 +5,8 @@ import subprocess
 from pathlib import Path
 import yaml
 
+from treehouse.core.agent_image import agent_service
+
 
 class ComposeGenerator:
     """Auto-detect project stack and generate a docker-compose.yml."""
@@ -126,8 +128,15 @@ class ComposeGenerator:
 
         return compose, port_defaults
 
-    def generate(self, project_root: Path, output_path: Path) -> dict[str, int]:
+    def generate(
+        self,
+        project_root: Path,
+        output_path: Path,
+        agent_task: str | None = None,
+    ) -> dict[str, int]:
         compose, port_defaults = self.detect(project_root)
+        if agent_task is not None:
+            compose.setdefault("services", {})["agent"] = agent_service(agent_task)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w") as f:
             yaml.dump(compose, f, default_flow_style=False)
@@ -141,6 +150,7 @@ class DockerManager:
     def generate(
         self, output_path: Path, project_name: str,
         port_mapping: dict[str, dict[str, int]],
+        agent_task: str | None = None,
     ) -> None:
         with open(self.source_compose) as f:
             compose = yaml.safe_load(f)
@@ -150,6 +160,9 @@ class DockerManager:
                 compose["services"][service_name]["ports"] = [
                     f"{ports['host']}:{ports['container']}"
                 ]
+
+        if agent_task is not None:
+            compose.setdefault("services", {})["agent"] = agent_service(agent_task)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w") as f:

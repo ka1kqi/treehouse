@@ -39,6 +39,13 @@ DECOMPOSE_SCHEMA = json.dumps({
 
 
 class AgentRunner:
+    def __init__(self, containerized: bool = True) -> None:
+        # Containerized: agent runs inside the per-workspace `agent` compose
+        # service; output streamed via `docker logs -f`. Host: agent runs as
+        # a direct subprocess on the host with cwd=worktree_path. Default
+        # containerized for blast-radius isolation.
+        self.containerized = containerized
+
     def build_command(self, workspace: AgentWorkspace) -> list[str]:
         return [
             "claude",
@@ -110,6 +117,12 @@ class AgentRunner:
         return [(f"orch-{i+1}-{st['name']}", st["task"]) for i, st in enumerate(subtasks)]
 
     async def start(self, workspace: AgentWorkspace) -> None:
+        if self.containerized:
+            await self._start_container(workspace)
+        else:
+            await self._start_host(workspace)
+
+    async def _start_host(self, workspace: AgentWorkspace) -> None:
         import os
         cmd = self.build_command(workspace)
         env = os.environ.copy()
@@ -121,6 +134,43 @@ class AgentRunner:
             cwd=str(workspace.worktree_path),
             env=env,
             limit=1024 * 1024,  # 1MB line buffer for large stream-json output
+        )
+        workspace.process = process
+        workspace.status = AgentStatus.RUNNING
+
+    async def _start_container(self, workspace: AgentWorkspace) -> None:
+        compose_file = workspace.worktree_path / "docker-compose.treehouse.yml"
+        if not compose_file.exists():
+            raise RuntimeError(
+                f"compose file missing for workspace '{workspace.name}': {compose_file}"
+            )
+
+        # The agent service was brought up with the rest of compose
+        # (`docker compose up -d`). Look up its container id.
+        ps = await asyncio.create_subprocess_exec(
+            "docker", "compose",
+            "-f", str(compose_file),
+            "-p", workspace.compose_project,
+            "ps", "-q", "agent",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await ps.communicate()
+        container_id = stdout.decode().strip().split("\n")[0]
+        if not container_id:
+            err = stderr.decode("utf-8", errors="replace")[:300]
+            raise RuntimeError(
+                f"agent container not found for '{workspace.name}': {err}"
+            )
+        workspace.container_id = container_id
+
+        # `docker logs -f` blocks until the container exits and gives us the
+        # stream-json output unmolested (no `agent_1 |` prefix).
+        process = await asyncio.create_subprocess_exec(
+            "docker", "logs", "-f", container_id,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            limit=1024 * 1024,
         )
         workspace.process = process
         workspace.status = AgentStatus.RUNNING
@@ -152,12 +202,43 @@ class AgentRunner:
         if not workspace.process:
             return
         returncode = await workspace.process.wait()
+        if self.containerized and workspace.container_id:
+            # `docker logs -f` exits 0 when the container exits, regardless of
+            # the agent's actual exit status. Inspect the container for the
+            # real code.
+            inspect = await asyncio.create_subprocess_exec(
+                "docker", "inspect",
+                "-f", "{{.State.ExitCode}}",
+                workspace.container_id,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await inspect.communicate()
+            try:
+                returncode = int(stdout.decode().strip())
+            except ValueError:
+                pass
         workspace.status = AgentStatus.DONE if returncode == 0 else AgentStatus.FAILED
         workspace.process = None
 
     async def stop(self, workspace: AgentWorkspace) -> None:
-        if workspace.process:
+        if self.containerized and workspace.container_id:
+            stop_proc = await asyncio.create_subprocess_exec(
+                "docker", "stop", workspace.container_id,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await stop_proc.wait()
+            if workspace.process:
+                # `docker logs -f` will exit on its own once the container
+                # stops; give it a moment then make sure it's gone.
+                try:
+                    await asyncio.wait_for(workspace.process.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    workspace.process.terminate()
+                    await workspace.process.wait()
+        elif workspace.process:
             workspace.process.terminate()
             await workspace.process.wait()
-            workspace.status = AgentStatus.FAILED
-            workspace.process = None
+        workspace.status = AgentStatus.FAILED
+        workspace.process = None

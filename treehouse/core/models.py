@@ -32,6 +32,9 @@ class AgentWorkspace:
     process: asyncio.subprocess.Process | None = None
     log_buffer: deque[str] = field(default_factory=lambda: deque(maxlen=500))
     output_buffer: deque[str] = field(default_factory=lambda: deque(maxlen=500))
+    # Set when the agent runs in a container; resolved at runtime via
+    # `docker compose ps -q agent` against compose_project.
+    container_id: str = ""
 
     def __post_init__(self):
         if not self.branch:
@@ -48,6 +51,7 @@ class AgentWorkspace:
             "branch": self.branch,
             "compose_project": self.compose_project,
             "status": self.status.value,
+            "container_id": self.container_id,
         }
 
     @classmethod
@@ -60,5 +64,6 @@ class AgentWorkspace:
             branch=data.get("branch", ""),
             compose_project=data.get("compose_project", ""),
             status=AgentStatus(data.get("status", "pending")),
+            container_id=data.get("container_id", ""),
         )
         return ws
