@@ -19,7 +19,7 @@ export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: "Treehouse — Parallel runtime isolation for multi-agent coding",
   description:
-    "A CLI that spawns isolated worktrees, Docker projects, and environments per AI agent — then merges them back with AI-assisted conflict resolution.",
+    "An orchestrator decomposes a task into parallel agents, each in an isolated worktree and Docker project — then merges their work back with AI-assisted conflict resolution.",
   openGraph: {
     title: "Treehouse — Parallel runtime isolation for multi-agent coding",
     description:

@@ -167,11 +167,11 @@ export default async function Image() {
               fontSize: 22,
               lineHeight: 1.5,
               color: "rgba(232,232,232,0.6)",
-              maxWidth: 820,
+              maxWidth: 880,
             }}
           >
-            A CLI that spawns isolated worktrees, Docker projects, and
-            environments per AI agent — then merges them back.
+            An orchestrator decomposes a task into parallel agents, each in
+            an isolated worktree and Docker project — then merges them back.
           </span>
         </div>
 

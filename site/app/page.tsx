@@ -3,7 +3,8 @@ import InstallButton from "./components/InstallButton";
 
 const COMMANDS: [string, string][] = [
   ["treehouse init", "initialize in the current repo"],
-  ["treehouse spawn <name> \"<task>\"", "create workspace + launch agent"],
+  ["treehouse orchestrate \"<task>\"", "decompose a task and spawn agents in parallel"],
+  ["treehouse spawn <name> \"<task>\"", "create workspace + launch a single agent"],
   ["treehouse list", "list all agents and status"],
   ["treehouse stop <name>", "stop a running agent"],
   ["treehouse merge <name>", "merge agent's branch back to main"],
@@ -29,9 +30,9 @@ export default function Page() {
               for multi-agent coding.
             </h1>
             <p className="mt-6 max-w-xl text-pretty text-[13px] leading-relaxed text-fg/70 sm:text-sm">
-              A CLI that spawns isolated worktrees, Docker projects, and
-              environments per AI agent — then merges them back with
-              AI-assisted conflict resolution.
+              An orchestrator decomposes a task into parallel agents, each in
+              an isolated worktree and Docker project — then merges their work
+              back with AI-assisted conflict resolution.
             </p>
           </div>
 
@@ -72,19 +73,24 @@ export default function Page() {
           <div className="mb-12 text-[10px] tracking-wider2 text-muted">
             02 — HOW IT WORKS
           </div>
-          <div className="grid grid-cols-1 gap-12 md:grid-cols-3 md:gap-10">
+          <div className="grid grid-cols-1 gap-12 sm:grid-cols-2 md:gap-10 lg:grid-cols-4">
             <Step
               num="01"
+              label="ORCHESTRATE"
+              body="Describe a high-level task. Claude decomposes it into parallel subtasks, one per agent."
+            />
+            <Step
+              num="02"
               label="ISOLATE"
               body="Each agent gets a git worktree on its own branch, a Docker Compose project with remapped ports, and a rewritten .env."
             />
             <Step
-              num="02"
+              num="03"
               label="OBSERVE"
               body="A terminal dashboard streams live logs from every agent in parallel."
             />
             <Step
-              num="03"
+              num="04"
               label="MERGE"
               body="Branches merge sequentially. Conflicts route to a dedicated Claude Code session with the original task context."
             />
