@@ -104,20 +104,19 @@ export default function Page() {
           <div className="mb-10 text-[10px] tracking-wider2 text-muted">
             03 — COMMANDS
           </div>
-          <div className="border-y border-hairline">
-            <table className="w-full text-[13px]">
-              <tbody>
-                {COMMANDS.map(([cmd, desc]) => (
-                  <tr key={cmd} className="align-top">
-                    <td className="py-3 pr-6 font-medium text-fg sm:py-4">
-                      {cmd}
-                    </td>
-                    <td className="py-3 text-fg/55 sm:py-4">{desc}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <dl className="border-y border-hairline text-[13px]">
+            {COMMANDS.map(([cmd, desc]) => (
+              <div
+                key={cmd}
+                className="flex flex-col gap-1 py-3 sm:flex-row sm:items-baseline sm:gap-8 sm:py-4"
+              >
+                <dt className="break-words font-medium text-fg sm:w-72 sm:shrink-0">
+                  {cmd}
+                </dt>
+                <dd className="text-fg/55">{desc}</dd>
+              </div>
+            ))}
+          </dl>
         </div>
       </section>
 
